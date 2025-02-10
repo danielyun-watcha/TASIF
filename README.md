@@ -8,7 +8,7 @@ Overall framework of TASIF.
 
 ## Preparation
 
-We train and evaluate our TASIF using a NVIDIA GeForce RTX 4090 GPU with 24 GB memory, where the CUDA version is 12.5 and python version is 3.8.20. Our code is based on PyTorch 2.4.1 and runnable for both windows and ubuntu server. Required python packages:
+We train and evaluate our TASIF using a NVIDIA GeForce RTX 4090 GPU with 24 GB memory, where the CUDA version is 12.5 and python version is 3.8.20. Our code is based on PyTorch 2.4.1, and requires the following python packages:
 
 > + numpy==1.24.4
 > + scipy==1.10.1
