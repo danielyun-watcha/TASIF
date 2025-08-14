@@ -59,19 +59,7 @@ class FilterLayer(nn.Module):
         return hidden_states
     
 class TASIFMultiHeadAttention(nn.Module):
-    """
-    DIF Multi-head Self-attention layers, a attention score dropout layer is introduced.
-
-    Args:
-        input_tensor (torch.Tensor): the input of the multi-head self-attention layer
-        attention_mask (torch.Tensor): the attention mask for input tensor
-
-    Returns:
-        hidden_states (torch.Tensor): the output of the multi-head self-attention layer
-
-    """
-
-    def __init__(self, n_heads, hidden_size,attribute_hidden_size,feat_num, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps, attn_fusion_type, emb_fusion_type, max_len):
+    def __init__(self, n_heads, hidden_size,attribute_hidden_size,feat_num, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps, fusion_type, max_len):
         super(TASIFMultiHeadAttention, self).__init__()
         if hidden_size % n_heads != 0:
             raise ValueError(
@@ -84,38 +72,23 @@ class TASIFMultiHeadAttention(nn.Module):
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.attribute_attention_head_size = [int(_ / n_heads) for _ in attribute_hidden_size]
         self.attribute_all_head_size = [self.num_attention_heads * _ for _ in self.attribute_attention_head_size]
-        self.attn_fusion_type = attn_fusion_type
         self.max_len = max_len
-        self.emb_fusion_type = emb_fusion_type
+        self.fusion_type = fusion_type
 
         self.value = nn.Linear(hidden_size, self.all_head_size)
-
-        self.query_p = nn.Linear(hidden_size, self.all_head_size)
-        self.key_p = nn.Linear(hidden_size, self.all_head_size)
-
-
-        if self.emb_fusion_type == 'concat':
-            self.query_f = nn.Linear(hidden_size*(feat_num+1), self.all_head_size)
-            self.key_f = nn.Linear(hidden_size*(feat_num+1), self.all_head_size)
-            self.value_f = nn.Linear(hidden_size*(feat_num+1), self.all_head_size)
-        else:
-            self.query_f = nn.Linear(hidden_size, self.all_head_size)
-            self.key_f = nn.Linear(hidden_size, self.all_head_size)
-            self.value_f = nn.Linear(hidden_size, self.all_head_size)
+        self.query_f = nn.Linear(hidden_size, self.all_head_size)
+        self.key_f = nn.Linear(hidden_size, self.all_head_size)
 
         self.feat_num = feat_num
         self.query_layers = nn.ModuleList([copy.deepcopy(nn.Linear(attribute_hidden_size[_], self.attribute_all_head_size[_])) for _ in range(self.feat_num)])
         self.key_layers = nn.ModuleList([copy.deepcopy(nn.Linear(attribute_hidden_size[_], self.attribute_all_head_size[_])) for _ in range(self.feat_num)])
         self.value_layers = nn.ModuleList([copy.deepcopy(nn.Linear(attribute_hidden_size[_], self.attribute_all_head_size[_])) for _ in range(self.feat_num)])
-
-        self.tensor_fusion_layer = nn.Linear(hidden_size * (1 + self.feat_num), hidden_size)
-        if self.emb_fusion_type == 'gate':
+        
+        if self.fusion_type == 'concat':
+            self.tensor_fusion_layer = nn.Linear(hidden_size * (2 + self.feat_num), hidden_size)
+        elif self.fusion_type == 'gate':
             self.tensor_fusion_layer = GatingFusor(hidden_size)
 
-        if self.attn_fusion_type == 'concat':
-            self.fusion_layer = nn.Linear(self.max_len*2, self.max_len)
-        elif self.attn_fusion_type == 'gate':
-            self.fusion_layer = VanillaAttention(self.max_len,self.max_len)
         self.attn_dropout = nn.Dropout(attn_dropout_prob)
 
         self.dense = nn.Linear(hidden_size, hidden_size)
@@ -159,26 +132,21 @@ class TASIFMultiHeadAttention(nn.Module):
     def forward(self, input_tensor, attribute_table, position_embedding, attention_mask):
         item_value_layer = self.transpose_for_scores(self.value(input_tensor))
 
-        pos_query_layer = self.transpose_for_scores(self.query_p(position_embedding))
-        pos_key_layer = self.transpose_for_scores(self.key_p(position_embedding))
-
-        if self.emb_fusion_type == 'sum':
-            fusion_tensor = input_tensor + torch.sum(torch.cat(attribute_table, dim=-2), dim=-2)
-        elif self.emb_fusion_type == 'gate':
-            attr_tensor = torch.cat(attribute_table, dim=-1)
-            fusion_tensor = torch.cat([input_tensor.unsqueeze(-2), attr_tensor], dim=-2)
-            fusion_tensor = self.tensor_fusion_layer(fusion_tensor)
-        else:
+        if self.fusion_type == 'sum':
+            fusion_tensor = input_tensor + torch.sum(torch.cat(attribute_table, dim=-2), dim=-2) + position_embedding
+        elif self.fusion_type == 'concat':
             attr_tensor = torch.cat(attribute_table, dim=-1).squeeze(-2)
-            fusion_tensor = torch.cat((input_tensor, attr_tensor), dim=-1)
-            if self.emb_fusion_type == 'linear':
-                fusion_tensor = self.tensor_fusion_layer(fusion_tensor)
+            fusion_tensor = torch.cat((input_tensor, attr_tensor, position_embedding), dim=-1)
+            fusion_tensor = self.tensor_fusion_layer(fusion_tensor)
+        elif self.fusion_type == 'gate':
+            attr_tensor = torch.cat(attribute_table, dim=-2)
+            fusion_tensor = torch.cat([input_tensor.unsqueeze(-2), attr_tensor, position_embedding.unsqueeze(-2)], dim=-2)
+            fusion_tensor = self.tensor_fusion_layer(fusion_tensor)
 
         fusion_query_layer = self.transpose_for_scores(self.query_f(fusion_tensor))
         fusion_key_layer = self.transpose_for_scores(self.key_f(fusion_tensor))
 
         fusion_attention_scores = torch.matmul(fusion_query_layer, fusion_key_layer.transpose(-1, -2))
-        pos_scores = torch.matmul(pos_query_layer, pos_key_layer.transpose(-1, -2))
 
         attribute_hidden_states_table = []
         for i, (attribute_query, attribute_key, attribute_value, attr_dense, attr_layernorm) in enumerate(
@@ -191,40 +159,17 @@ class TASIFMultiHeadAttention(nn.Module):
             attribute_hidden_states = self.compute(attribute_tensor, attribute_value_layer, attribute_attention_scores, attention_mask, attr_dense, attr_layernorm)
             attribute_hidden_states_table.append(attribute_hidden_states.unsqueeze(-2))
 
-        if self.attn_fusion_type == 'sum':
-            attention_scores = fusion_attention_scores + pos_scores
-        elif self.attn_fusion_type == 'concat':
-            attention_scores = torch.cat([fusion_attention_scores, pos_scores], dim=-1)
-            attention_scores = self.fusion_layer(attention_scores)
-        elif self.attn_fusion_type == 'gate':
-            attention_scores = torch.cat([fusion_attention_scores.unsqueeze(-2), pos_scores.unsqueeze(-2)], dim=-2)
-            attention_scores,_ = self.fusion_layer(attention_scores)
-
-        item_hidden_states = self.compute(input_tensor, item_value_layer, attention_scores, attention_mask, self.dense, self.LayerNorm)
-
+        item_hidden_states = self.compute(input_tensor, item_value_layer, fusion_attention_scores, attention_mask, self.dense, self.LayerNorm)
         return item_hidden_states, attribute_hidden_states_table
 
 class TASIFTransformerLayer(nn.Module):
-    """
-    One decoupled transformer layer consists of a decoupled multi-head self-attention layer and a point-wise feed-forward layer.
-
-    Args:
-        hidden_states (torch.Tensor): the input of the multi-head self-attention sublayer
-        attention_mask (torch.Tensor): the attention mask for the multi-head self-attention sublayer
-
-    Returns:
-        feedforward_output (torch.Tensor): The output of the point-wise feed-forward sublayer,
-                                           is the output of the transformer layer.
-
-    """
-
     def __init__(
         self, n_heads, hidden_size,attribute_hidden_size,feat_num, intermediate_size, hidden_dropout_prob, attn_dropout_prob, hidden_act,
-        layer_norm_eps, attn_fusion_type, emb_fusion_type, max_len, filter_weight, filter_dropout_prob 
+        layer_norm_eps, fusion_type, max_len, filter_weight, filter_dropout_prob 
     ):
         super(TASIFTransformerLayer, self).__init__()
         self.multi_head_attention = TASIFMultiHeadAttention(
-            n_heads, hidden_size, attribute_hidden_size, feat_num, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps, attn_fusion_type, emb_fusion_type, max_len,
+            n_heads, hidden_size, attribute_hidden_size, feat_num, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps, fusion_type, max_len,
         )
         self.feed_forward = FeedForward(hidden_size, intermediate_size, hidden_dropout_prob, hidden_act, layer_norm_eps)
         self.attr_feed_forward = nn.ModuleList([copy.deepcopy(FeedForward(attribute_hidden_size[_], intermediate_size, hidden_dropout_prob, hidden_act, layer_norm_eps)) for _ in range(feat_num)])
@@ -245,24 +190,6 @@ class TASIFTransformerLayer(nn.Module):
         return feedforward_output, feedforward_attribute_output
 
 class TASIFTransformerEncoder(nn.Module):
-    r""" One decoupled TransformerEncoder consists of several decoupled TransformerLayers.
-
-        - n_layers(num): num of transformer layers in transformer encoder. Default: 2
-        - n_heads(num): num of attention heads for multi-head attention layer. Default: 2
-        - hidden_size(num): the input and output hidden size. Default: 64
-        - attribute_hidden_size(list): the hidden size of attributes. Default:[64]
-        - feat_num(num): the number of attributes. Default: 1
-        - inner_size(num): the dimensionality in feed-forward layer. Default: 256
-        - hidden_dropout_prob(float): probability of an element to be zeroed. Default: 0.5
-        - attn_dropout_prob(float): probability of an attention score to be zeroed. Default: 0.5
-        - hidden_act(str): activation function in feed-forward layer. Default: 'gelu'
-                      candidates: 'gelu', 'relu', 'swish', 'tanh', 'sigmoid'
-        - layer_norm_eps(float): a value added to the denominator for numerical stability. Default: 1e-12
-        - fusion_type(str): fusion function used in attention fusion module. Default: 'sum'
-                            candidates: 'sum','concat','gate'
-
-    """
-
     def __init__(
         self,
         n_layers=2,
@@ -275,8 +202,7 @@ class TASIFTransformerEncoder(nn.Module):
         attn_dropout_prob=0.5,
         hidden_act='gelu',
         layer_norm_eps=1e-12,
-        attn_fusion_type = 'sum',
-        emb_fusion_type = 'sum',
+        fusion_type = 'sum',
         max_len = None, 
         filter_weight = None,
         filter_dropout_prob = None
@@ -285,11 +211,11 @@ class TASIFTransformerEncoder(nn.Module):
         super(TASIFTransformerEncoder, self).__init__()
         layer = TASIFTransformerLayer(
             n_heads, hidden_size,attribute_hidden_size,feat_num, inner_size, hidden_dropout_prob, attn_dropout_prob,
-            hidden_act, layer_norm_eps, attn_fusion_type, emb_fusion_type, max_len, filter_weight, filter_dropout_prob 
+            hidden_act, layer_norm_eps, fusion_type, max_len, filter_weight, filter_dropout_prob 
         )
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(n_layers)])
 
-    def forward(self, hidden_states, attribute_hidden_states,position_embedding, attention_mask, output_all_encoded_layers=True):
+    def forward(self, hidden_states, attribute_hidden_states, position_embedding, attention_mask, output_all_encoded_layers=True):
         """
         Args:
             hidden_states (torch.Tensor): the input of the TransformerEncoder
@@ -312,11 +238,6 @@ class TASIFTransformerEncoder(nn.Module):
         return all_encoder_layers
 
 class TASIF(SequentialRecommender):
-    """
-    DIF-SR moves the side information from the input to the attention layer and decouples the attention calculation of
-    various side information and item representation
-    """
-
     def __init__(self, config, dataset):
         super(TASIF, self).__init__(config, dataset)
         self.config = config
@@ -339,8 +260,7 @@ class TASIF(SequentialRecommender):
 
         self.initializer_range = config['initializer_range']
         self.loss_type = config['loss_type']
-        self.attn_fusion_type = config['attn_fusion_type']
-        self.emb_fusion_type = config['emb_fusion_type']
+        self.fusion_type = config['fusion_type']
 
         self.lamdas = config['lamdas']
         self.attribute_predictor = config['attribute_predictor']
@@ -365,8 +285,7 @@ class TASIF(SequentialRecommender):
             attn_dropout_prob=self.attn_dropout_prob,
             hidden_act=self.hidden_act,
             layer_norm_eps=self.layer_norm_eps,
-            attn_fusion_type=self.attn_fusion_type,
-            emb_fusion_type=self.emb_fusion_type,
+            fusion_type=self.fusion_type,
             max_len=self.max_seq_length,
             filter_weight=self.config['filter_weight'],
             filter_dropout_prob=self.config['filter_dropout_prob']
@@ -391,6 +310,8 @@ class TASIF(SequentialRecommender):
 
         self.LayerNorm = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
+
+        self.attribute_weight = nn.Parameter(torch.ones(len(self.selected_features)), requires_grad=True)
 
         if self.loss_type == 'BPR':
             self.loss_fct = BPRLoss()
@@ -503,14 +424,20 @@ class TASIF(SequentialRecommender):
 
             attr_emb_table = self.get_attr_emb()
             al_loss = 0.0
+            cl_loss = 0.0
+            weights = torch.softmax(self.attribute_weight, dim=0)
             for i, (attribute_seq_output, atrribute_emb) in enumerate(zip(attribute_seq_output_table, attr_emb_table)):
                 atrribute_emb = atrribute_emb.squeeze(-2)                
                 attr_logits = torch.matmul(attribute_seq_output, atrribute_emb.transpose(0, 1))
+                al_loss += weights[i] * self.loss_fct(attr_logits, pos_items)
+                cl_loss += weights[i] * self.InfoNCE(test_item_emb[torch.unique(pos_items)], atrribute_emb[torch.unique(pos_items)], 0.2)
 
-                al_loss += self.config['al_weight'][i] * self.loss_fct(attr_logits, pos_items)
+            # attr_emb_all = torch.sum(torch.cat(attr_emb_table, dim=-2), dim=-2) 
+            # cl_loss = self.InfoNCE(test_item_emb[torch.unique(pos_items)], attr_emb_all[torch.unique(pos_items)], 0.2) + self.InfoNCE(attr_emb_all[torch.unique(pos_items)], test_item_emb[torch.unique(pos_items)], 0.2)
 
-            if self.attribute_predictor!='' and self.attribute_predictor!='not':
-                loss_dic = {'item_loss':loss}
+            total_loss = loss + self.config['al_weight'] * al_loss + self.config['cl_weight'] * cl_loss
+            if self.attribute_predictor !='' and self.attribute_predictor != 'not':
+                loss_dic = {}
                 attribute_loss_sum = 0
                 for i, a_predictor in enumerate(self.ap):
                     attribute_logits = a_predictor(seq_output)
@@ -524,21 +451,11 @@ class TASIF(SequentialRecommender):
                     attribute_loss = self.attribute_loss_fct(attribute_logits, attribute_labels)
                     attribute_loss = torch.mean(attribute_loss[:, 1:])
                     loss_dic[self.selected_features[i]] = attribute_loss
-                if self.num_feature_field == 1:
-                    total_loss = loss + self.lamdas[0] * attribute_loss
-                    # print('total_loss:{}\titem_loss:{}\tattribute_{}_loss:{}'.format(total_loss, loss,self.selected_features[0],attribute_loss))
-                else:
-                    for i,attribute in enumerate(self.selected_features):
-                        attribute_loss_sum += self.lamdas[i] * loss_dic[attribute]
-                    total_loss = loss + attribute_loss_sum
-                    loss_dic['total_loss'] = total_loss
-                    # s = ''
-                    # for key,value in loss_dic.items():
-                    #     s += '{}_{:.4f}\t'.format(key,value.item())
-                    # print(s)
-            else:
-                total_loss = loss
-            return total_loss + al_loss
+
+                for i,attribute in enumerate(self.selected_features):
+                    attribute_loss_sum += weights[i] * loss_dic[attribute]
+                total_loss += self.lamdas * attribute_loss_sum
+            return total_loss
 
     def predict(self, interaction):
         item_seq = interaction[self.ITEM_SEQ]
@@ -560,10 +477,11 @@ class TASIF(SequentialRecommender):
         atrribute_emb_table = self.get_attr_emb()
 
         atrribute_scores_table = []
+        weights = torch.softmax(self.attribute_weight, dim=0)
         for i, (attribute_seq_output, atrribute_emb) in enumerate(zip(attribute_seq_output_table, atrribute_emb_table)):
             atrribute_emb = atrribute_emb.squeeze(-2)                
             atrribute_scores = torch.matmul(attribute_seq_output, atrribute_emb.transpose(0, 1))
-            atrribute_scores_table.append(self.config['attr_score_weight'][i] * atrribute_scores)
+            atrribute_scores_table.append(weights[i] * atrribute_scores)
         atrribute_scores = torch.stack(atrribute_scores_table).sum(dim=0)
-        scores = (1 - sum(self.config['attr_score_weight'])) * scores + atrribute_scores
+        scores = (1 - self.config['attr_score_weight']) * scores + self.config['attr_score_weight'] * atrribute_scores
         return scores

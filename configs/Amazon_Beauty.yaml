@@ -42,12 +42,13 @@ initializer_range: 0.02
 selected_features: ['categories']
 pooling_mode: 'sum'
 loss_type: 'CE'
-attn_fusion_type: 'sum'
-emb_fusion_type: 'sum'
-lamdas: [10]
+
+fusion_type: 'sum'
 attribute_predictor: 'linear'
-al_weight: [1.0]
-attr_score_weight: [0.1]
+lamdas: 10
+al_weight: 1.0
+cl_weight: 0.01
+attr_score_weight: 0.1
 filter_weight: 0.5
 filter_dropout_prob: 0.6
 
@@ -56,7 +57,7 @@ epochs: 300
 train_batch_size: 2048
 learner: adam
 learning_rate: 0.0001
-eval_step: 2
+eval_step: 1
 stopping_step: 10
 clip_grad_norm: ~
 weight_decay: 0.0
@@ -71,7 +72,7 @@ eval_args:
 
 repeatable: True
 metrics: ["Recall","NDCG"]
-topk: [3,5,10,20]
+topk: [5,10,20]
 valid_metric: Recall@20
 valid_metric_bigger: True
 eval_batch_size: 128
