@@ -1,0 +1,63 @@
+# ml-1m BERT4Rec config
+gpu_id: 0
+use_gpu: True
+seed: 2020
+state: INFO
+reproducibility: True
+data_path: '/content/drive/MyDrive/TASIF/dataset/'
+checkpoint_dir: 'saved'
+show_progress: True
+save_dataset: False
+save_dataloaders: False
+
+# dataset
+load_col:
+    inter: [user_id, item_id, timestamp]
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+TIME_FIELD: timestamp
+
+# Model - BERT4Rec specific
+n_layers: 2
+n_heads: 2
+hidden_size: 64
+inner_size: 256
+hidden_dropout_prob: 0.2
+attn_dropout_prob: 0.2
+hidden_act: 'gelu'
+layer_norm_eps: 1e-12
+initializer_range: 0.02
+mask_ratio: 0.2
+MAX_ITEM_LIST_LENGTH: 200
+
+# training settings
+epochs: 300
+train_batch_size: 128
+learner: adam
+learning_rate: 0.001
+eval_step: 1
+stopping_step: 20
+clip_grad_norm: ~
+weight_decay: 0.0
+loss_type: 'CE'
+
+# No negative sampling for CE loss
+neg_sampling: ~
+
+# evaluation settings
+eval_args:
+  split: {'RS': [0.8,0.1,0.1]}
+  group_by: user
+  order: TO
+  mode: full
+
+repeatable: True
+metrics: ["Recall","NDCG","Hit"]
+topk: [10, 20]
+valid_metric: Recall@20
+valid_metric_bigger: True
+eval_batch_size: 4096
+
+# wandb logging
+use_wandb: True
+wandb_project: 'recbole-ls'

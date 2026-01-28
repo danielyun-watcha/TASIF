@@ -1,0 +1,46 @@
+# Label Smoothing = 0.0001
+gpu_id: 0
+use_gpu: False
+seed: 2020
+state: INFO
+reproducibility: True
+data_path: 'dataset/'
+checkpoint_dir: 'saved'
+show_progress: True
+save_dataset: False
+save_dataloaders: False
+load_col:
+    inter: [user_id, item_id]
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+val_interval: ~
+filter_inter_by_user_or_item: True
+user_inter_num_interval: "[0,inf)"
+item_inter_num_interval: "[0,inf)"
+embedding_size: 64
+n_layers: 3
+reg_weight: 1e-05
+label_smoothing: 0.0001
+epochs: 300
+train_batch_size: 2048
+learner: adam
+learning_rate: 0.001
+eval_step: 1
+stopping_step: 20
+clip_grad_norm: ~
+weight_decay: 0.0
+neg_sampling:
+    uniform: 1
+eval_args:
+  split: {'RS': [0.8,0.1,0.1]}
+  group_by: user
+  order: RO
+  mode: full
+repeatable: True
+metrics: ["Recall","MRR","NDCG","Hit","Precision"]
+topk: [10]
+valid_metric: MRR@10
+valid_metric_bigger: True
+eval_batch_size: 4096
+loss_decimal_place: 4
+metric_decimal_place: 4

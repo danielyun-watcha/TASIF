@@ -43,6 +43,7 @@ class BERT4Rec(SequentialRecommender):
         self.mask_ratio = config['mask_ratio']
 
         self.loss_type = config['loss_type']
+        self.label_smoothing = config['label_smoothing'] if 'label_smoothing' in config.final_config_dict else 0.0
         self.initializer_range = config['initializer_range']
 
         # load dataset info
@@ -223,7 +224,7 @@ class BERT4Rec(SequentialRecommender):
             return loss
 
         elif self.loss_type == 'CE':
-            loss_fct = nn.CrossEntropyLoss(reduction='none')
+            loss_fct = nn.CrossEntropyLoss(reduction='none', label_smoothing=self.label_smoothing)
             test_item_emb = self.item_embedding.weight[:self.n_items]  # [item_num H]
             logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))  # [B mask_len item_num]
             targets = (masked_index > 0).float().view(-1)  # [B*mask_len]

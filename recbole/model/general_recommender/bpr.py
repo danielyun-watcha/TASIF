@@ -27,6 +27,7 @@ from recbole.utils import InputType
 class BPR(GeneralRecommender):
     r"""BPR is a basic matrix factorization model that be trained in the pairwise way.
 
+    Supports optional label smoothing for BPR loss via config parameter 'label_smoothing'.
     """
     input_type = InputType.PAIRWISE
 
@@ -35,6 +36,9 @@ class BPR(GeneralRecommender):
 
         # load parameters info
         self.embedding_size = config['embedding_size']
+
+        # Label smoothing parameter (0 = no smoothing, use standard BPR)
+        self.label_smoothing = config['label_smoothing'] if 'label_smoothing' in config.final_config_dict else 0.0
 
         # define layers and loss
         self.user_embedding = nn.Embedding(self.n_users, self.embedding_size)
@@ -71,6 +75,21 @@ class BPR(GeneralRecommender):
         item_e = self.get_item_embedding(item)
         return user_e, item_e
 
+    def bpr_loss_with_label_smoothing(self, pos_scores, neg_scores):
+        """
+        BPR Loss with Label Smoothing.
+
+        Standard BPR: -log(sigmoid(pos - neg))
+        With label smoothing (ε): -(1-ε)*log(p) - ε*log(1-p)
+        """
+        diff = pos_scores - neg_scores
+        prob = torch.sigmoid(diff)
+
+        soft_target = 1.0 - self.label_smoothing
+        loss = -soft_target * torch.log(prob + 1e-10) - self.label_smoothing * torch.log(1 - prob + 1e-10)
+
+        return loss.mean()
+
     def calculate_loss(self, interaction):
         user = interaction[self.USER_ID]
         pos_item = interaction[self.ITEM_ID]
@@ -79,7 +98,11 @@ class BPR(GeneralRecommender):
         user_e, pos_e = self.forward(user, pos_item)
         neg_e = self.get_item_embedding(neg_item)
         pos_item_score, neg_item_score = torch.mul(user_e, pos_e).sum(dim=1), torch.mul(user_e, neg_e).sum(dim=1)
-        loss = self.loss(pos_item_score, neg_item_score)
+
+        if self.label_smoothing > 0:
+            loss = self.bpr_loss_with_label_smoothing(pos_item_score, neg_item_score)
+        else:
+            loss = self.loss(pos_item_score, neg_item_score)
         return loss
 
     def predict(self, interaction):

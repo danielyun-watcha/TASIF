@@ -1,0 +1,7 @@
+embedding_size: 64
+n_layers: 3
+reg_weight: 1e-04
+
+# SSM specific parameters
+label_smoothing: 0.1
+num_neg: 10

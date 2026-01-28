@@ -4,62 +4,57 @@
 # @Email  : cx.tian@outlook.com
 
 # UPDATE:
-# @Time   : 2020/9/16
-# @Author : Shanlei Mu
+# @Time   : 2020/9/16, 2026/01/23
+# @Author : Shanlei Mu, Modified for SSM Loss
 # @Email  : slmu@ruc.edu.cn
 
 r"""
-LightGCN
+LightGCN-SSM
 ################################################
+
+LightGCN with Sampled Softmax Loss (SSM).
+Reference implementation from TTEN (CIKM 2023) and EDGE (CIKM 2024).
 
 Reference:
     Xiangnan He et al. "LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation." in SIGIR 2020.
-
-Reference code:
-    https://github.com/kuandeng/LightGCN
 """
 
 import numpy as np
 import scipy.sparse as sp
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from recbole.model.abstract_recommender import GeneralRecommender
 from recbole.model.init import xavier_uniform_initialization
-from recbole.model.loss import BPRLoss, EmbLoss
+from recbole.model.loss import EmbLoss
 from recbole.utils import InputType
 
 
-class LightGCN(GeneralRecommender):
-    r"""LightGCN is a GCN-based recommender model.
+class LightGCN_SSM(GeneralRecommender):
+    r"""LightGCN with SSM (Sampled Softmax) Loss.
 
-    LightGCN includes only the most essential component in GCN — neighborhood aggregation — for
-    collaborative filtering. Specifically, LightGCN learns user and item embeddings by linearly 
-    propagating them on the user-item interaction graph, and uses the weighted sum of the embeddings
-    learned at all layers as the final embedding.
-
-    We implement the model following the original author with a pairwise training mode.
+    Uses in-batch softmax loss following TTEN/EDGE implementation.
     """
-    input_type = InputType.PAIRWISE
+    input_type = InputType.POINTWISE  # SSM uses in-batch negatives
 
     def __init__(self, config, dataset):
-        super(LightGCN, self).__init__(config, dataset)
+        super(LightGCN_SSM, self).__init__(config, dataset)
 
         # load dataset info
         self.interaction_matrix = dataset.inter_matrix(form='coo').astype(np.float32)
 
         # load parameters info
-        self.latent_dim = config['embedding_size']  # int type:the embedding size of lightGCN
-        self.n_layers = config['n_layers']  # int type:the layer num of lightGCN
-        self.reg_weight = config['reg_weight']  # float32 type: the weight decay for l2 normalization
+        self.latent_dim = config['embedding_size']
+        self.n_layers = config['n_layers']
+        self.reg_weight = config['reg_weight']
 
-        # Label smoothing parameter (0 = no smoothing, use standard BPR)
-        self.label_smoothing = config['label_smoothing'] if 'label_smoothing' in config.final_config_dict else 0.0
+        # SSM specific parameters
+        self.ssm_temp = config['ssm_temp'] if 'ssm_temp' in config.final_config_dict else 0.1
 
         # define layers and loss
         self.user_embedding = torch.nn.Embedding(num_embeddings=self.n_users, embedding_dim=self.latent_dim)
         self.item_embedding = torch.nn.Embedding(num_embeddings=self.n_items, embedding_dim=self.latent_dim)
-        self.mf_loss = BPRLoss()
         self.reg_loss = EmbLoss()
 
         # storage variables for full sort evaluation acceleration
@@ -67,50 +62,11 @@ class LightGCN(GeneralRecommender):
         self.restore_item_e = None
 
         # generate intermediate data
-        # MPS doesn't support sparse tensors - keep sparse on CPU, compute there
-        self.use_mps = (self.device.type == 'mps')
-        if self.use_mps:
-            self.norm_adj_matrix = self.get_norm_adj_mat()  # Keep on CPU
-        else:
-            self.norm_adj_matrix = self.get_norm_adj_mat().to(self.device)
+        self.norm_adj_matrix = self.get_norm_adj_mat().to(self.device)
 
         # parameters initialization
         self.apply(xavier_uniform_initialization)
         self.other_parameter_name = ['restore_user_e', 'restore_item_e']
-
-        # For wandb logging - tracking log(sigmoid(scores))
-        self.log_pos_score_sum = 0.0
-        self.log_neg_score_sum = 0.0
-        self.score_count = 0
-
-    def reset_score_tracking(self):
-        """Reset accumulated scores at the start of each epoch."""
-        self.log_pos_score_sum = 0.0
-        self.log_neg_score_sum = 0.0
-        self.score_count = 0
-
-    def get_avg_log_scores(self):
-        """Get average log(sigmoid(scores)) for the epoch."""
-        if self.score_count == 0:
-            return 0.0, 0.0
-        avg_pos = self.log_pos_score_sum / self.score_count
-        avg_neg = self.log_neg_score_sum / self.score_count
-        return avg_pos, avg_neg
-
-    def bpr_loss_with_label_smoothing(self, pos_scores, neg_scores):
-        """
-        BPR Loss with Label Smoothing.
-
-        Standard BPR: -log(sigmoid(pos - neg))
-        With label smoothing (ε): -(1-ε)*log(p) - ε*log(1-p)
-        """
-        diff = pos_scores - neg_scores
-        prob = torch.sigmoid(diff)
-
-        soft_target = 1.0 - self.label_smoothing
-        loss = -soft_target * torch.log(prob + 1e-10) - self.label_smoothing * torch.log(1 - prob + 1e-10)
-
-        return loss.mean()
 
     def get_norm_adj_mat(self):
         r"""Get the normalized interaction matrix of users and items.
@@ -142,9 +98,9 @@ class LightGCN(GeneralRecommender):
         L = sp.coo_matrix(L)
         row = L.row
         col = L.col
-        indices = torch.LongTensor(np.array([row, col]))
-        values = torch.FloatTensor(L.data)
-        SparseL = torch.sparse_coo_tensor(indices, values, L.shape)
+        i = torch.LongTensor(np.array([row, col]))
+        data = torch.FloatTensor(L.data)
+        SparseL = torch.sparse.FloatTensor(i, data, torch.Size(L.shape))
         return SparseL
 
     def get_ego_embeddings(self):
@@ -163,11 +119,7 @@ class LightGCN(GeneralRecommender):
         embeddings_list = [all_embeddings]
 
         for layer_idx in range(self.n_layers):
-            if self.use_mps:
-                # MPS: move embeddings to CPU for sparse.mm, then back to MPS
-                all_embeddings = torch.sparse.mm(self.norm_adj_matrix, all_embeddings.cpu()).to(self.device)
-            else:
-                all_embeddings = torch.sparse.mm(self.norm_adj_matrix, all_embeddings)
+            all_embeddings = torch.sparse.mm(self.norm_adj_matrix, all_embeddings)
             embeddings_list.append(all_embeddings)
         lightgcn_all_embeddings = torch.stack(embeddings_list, dim=1)
         lightgcn_all_embeddings = torch.mean(lightgcn_all_embeddings, dim=1)
@@ -182,43 +134,35 @@ class LightGCN(GeneralRecommender):
 
         user = interaction[self.USER_ID]
         pos_item = interaction[self.ITEM_ID]
-        neg_item = interaction[self.NEG_ITEM_ID]
 
         user_all_embeddings, item_all_embeddings = self.forward()
-        u_embeddings = user_all_embeddings[user]
-        pos_embeddings = item_all_embeddings[pos_item]
-        neg_embeddings = item_all_embeddings[neg_item]
+        u_emb = user_all_embeddings[user]  # [batch, dim]
+        pos_emb = item_all_embeddings[pos_item]  # [batch, dim]
 
-        # calculate BPR Loss (with optional label smoothing)
-        pos_scores = torch.mul(u_embeddings, pos_embeddings).sum(dim=1)
-        neg_scores = torch.mul(u_embeddings, neg_embeddings).sum(dim=1)
+        # SSM Loss (In-batch Softmax) - following reference implementation
+        # L2 normalize embeddings
+        u_emb_norm = F.normalize(u_emb, dim=1)  # [batch, dim]
+        pos_emb_norm = F.normalize(pos_emb, dim=1)  # [batch, dim]
 
-        if self.label_smoothing > 0:
-            mf_loss = self.bpr_loss_with_label_smoothing(pos_scores, neg_scores)
-        else:
-            mf_loss = self.mf_loss(pos_scores, neg_scores)
+        # Positive scores: dot product of each user with its positive item
+        pos_score = (u_emb_norm * pos_emb_norm).sum(dim=-1)  # [batch]
+        pos_score = torch.exp(pos_score / self.ssm_temp)  # [batch]
 
-        # Track log(softmax(scores)) for wandb logging - measures overconfidence
-        with torch.no_grad():
-            # Compute scores for all items: [batch_size, n_items]
-            all_scores = torch.matmul(u_embeddings, item_all_embeddings.T)
-            # Log softmax over all items
-            log_probs = F.log_softmax(all_scores, dim=1)
-            # Get log probabilities for positive and negative items
-            batch_size = pos_item.shape[0]
-            log_pos = log_probs[torch.arange(batch_size, device=pos_item.device), pos_item].mean().item()
-            log_neg = log_probs[torch.arange(batch_size, device=neg_item.device), neg_item].mean().item()
-            self.log_pos_score_sum += log_pos
-            self.log_neg_score_sum += log_neg
-            self.score_count += 1
+        # Total scores: all user-item combinations in batch (in-batch negatives)
+        ttl_score = torch.matmul(u_emb_norm, pos_emb_norm.transpose(0, 1))  # [batch, batch]
+        ttl_score = torch.exp(ttl_score / self.ssm_temp).sum(dim=1)  # [batch]
 
-        # calculate reg Loss
+        # SSM loss: -log(pos / total)
+        ssm_loss = -torch.log(pos_score / ttl_score + 1e-6)
+        ssm_loss = torch.mean(ssm_loss)
+
+        # Regularization loss on ego embeddings
         u_ego_embeddings = self.user_embedding(user)
         pos_ego_embeddings = self.item_embedding(pos_item)
-        neg_ego_embeddings = self.item_embedding(neg_item)
+        reg_loss = self.reg_loss(u_ego_embeddings, pos_ego_embeddings)
 
-        reg_loss = self.reg_loss(u_ego_embeddings, pos_ego_embeddings, neg_ego_embeddings)
-        loss = mf_loss + self.reg_weight * reg_loss
+        # Total loss
+        loss = ssm_loss + self.reg_weight * reg_loss
 
         return loss
 
@@ -230,6 +174,7 @@ class LightGCN(GeneralRecommender):
 
         u_embeddings = user_all_embeddings[user]
         i_embeddings = item_all_embeddings[item]
+
         scores = torch.mul(u_embeddings, i_embeddings).sum(dim=1)
         return scores
 
@@ -237,6 +182,7 @@ class LightGCN(GeneralRecommender):
         user = interaction[self.USER_ID]
         if self.restore_user_e is None or self.restore_item_e is None:
             self.restore_user_e, self.restore_item_e = self.forward()
+
         # get user embedding from storage variable
         u_embeddings = self.restore_user_e[user]
 

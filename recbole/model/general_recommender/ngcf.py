@@ -35,6 +35,8 @@ from recbole.utils import InputType
 class NGCF(GeneralRecommender):
     r"""NGCF is a model that incorporate GNN for recommendation.
     We implement the model following the original author with a pairwise training mode.
+
+    Supports optional label smoothing for BPR loss via config parameter 'label_smoothing'.
     """
     input_type = InputType.PAIRWISE
 
@@ -51,6 +53,9 @@ class NGCF(GeneralRecommender):
         self.node_dropout = config['node_dropout']
         self.message_dropout = config['message_dropout']
         self.reg_weight = config['reg_weight']
+
+        # Label smoothing parameter (0 = no smoothing, use standard BPR)
+        self.label_smoothing = config['label_smoothing'] if 'label_smoothing' in config.final_config_dict else 0.0
 
         # define layers and loss
         self.sparse_dropout = SparseDropout(self.node_dropout)
@@ -147,6 +152,21 @@ class NGCF(GeneralRecommender):
 
         return user_all_embeddings, item_all_embeddings
 
+    def bpr_loss_with_label_smoothing(self, pos_scores, neg_scores):
+        """
+        BPR Loss with Label Smoothing.
+
+        Standard BPR: -log(sigmoid(pos - neg))
+        With label smoothing (ε): -(1-ε)*log(p) - ε*log(1-p)
+        """
+        diff = pos_scores - neg_scores
+        prob = torch.sigmoid(diff)
+
+        soft_target = 1.0 - self.label_smoothing
+        loss = -soft_target * torch.log(prob + 1e-10) - self.label_smoothing * torch.log(1 - prob + 1e-10)
+
+        return loss.mean()
+
     def calculate_loss(self, interaction):
         # clear the storage variable when training
         if self.restore_user_e is not None or self.restore_item_e is not None:
@@ -163,7 +183,12 @@ class NGCF(GeneralRecommender):
 
         pos_scores = torch.mul(u_embeddings, pos_embeddings).sum(dim=1)
         neg_scores = torch.mul(u_embeddings, neg_embeddings).sum(dim=1)
-        mf_loss = self.mf_loss(pos_scores, neg_scores)  # calculate BPR Loss
+
+        # calculate BPR Loss (with optional label smoothing)
+        if self.label_smoothing > 0:
+            mf_loss = self.bpr_loss_with_label_smoothing(pos_scores, neg_scores)
+        else:
+            mf_loss = self.mf_loss(pos_scores, neg_scores)
 
         reg_loss = self.reg_loss(u_embeddings, pos_embeddings, neg_embeddings)  # L2 regularization of embeddings
 
