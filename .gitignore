@@ -25,7 +25,6 @@ log/
 log_tensorboard/
 saved/
 wandb/
-dataset/
 *.log
 
 # Jupyter
