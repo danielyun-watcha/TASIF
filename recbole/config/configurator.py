@@ -346,7 +346,14 @@ class Config(object):
         ## @juyongjiang
         if use_gpu and not self.final_config_dict['multi_gpus']:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(self.final_config_dict['gpu_id'])
-        self.final_config_dict['device'] = torch.device("cuda" if torch.cuda.is_available() and use_gpu else "cpu")
+
+        # Device selection: CUDA > MPS (Apple Silicon) > CPU
+        if torch.cuda.is_available() and use_gpu:
+            self.final_config_dict['device'] = torch.device("cuda")
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() and use_gpu:
+            self.final_config_dict['device'] = torch.device("mps")
+        else:
+            self.final_config_dict['device'] = torch.device("cpu")
 
     def _set_train_neg_sample_args(self):
         neg_sampling = self.final_config_dict['neg_sampling']

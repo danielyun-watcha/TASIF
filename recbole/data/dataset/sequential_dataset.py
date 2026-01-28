@@ -41,18 +41,6 @@ class SequentialDataset(Dataset):
         """Change feat format from :class:`pandas.DataFrame` to :class:`Interaction`,
            then perform data augmentation.
         """
-        timestamps = self.inter_feat[self.time_field]
-        start_time = min(timestamps)
-        end_time = max(timestamps)
-
-        print("start time:", start_time)
-        print("end time:", end_time)
-
-        time_span = self.config['TIME_SPAN'] * 86400 # day * 24 * 60 * 60
-        timestamps_diff_list = [timestamp - start_time for timestamp in timestamps]
-        time_span_ids = [(timestamps_diff // time_span) + 1 for timestamps_diff in timestamps_diff_list]
-        self.inter_feat[self.config['TIME_SPAN_ID_FIELD']] = time_span_ids
-        self.set_field_property(self.config['TIME_SPAN_ID_FIELD'], self.field2type[self.iid_field], self.field2source[self.iid_field], self.field2seqlen[self.iid_field])
         super()._change_feat_format()
 
         if self.config['benchmark_filename'] is not None:
@@ -109,13 +97,15 @@ class SequentialDataset(Dataset):
         last_uid = None
         uid_list, item_list_index, target_index, item_list_length = [], [], [], []
         seq_start = 0
-        for i, uid in enumerate(self.inter_feat[self.uid_field].numpy()):
+        inter_feat_uid_field = self.inter_feat[self.uid_field].numpy()
+        for i, uid in enumerate(inter_feat_uid_field):
             if last_uid != uid:
                 last_uid = uid
                 seq_start = i
             else:
                 if i - seq_start > max_item_list_len:
                     seq_start += 1
+
                 uid_list.append(uid)
                 item_list_index.append(slice(seq_start, i))
                 target_index.append(i)
@@ -125,6 +115,11 @@ class SequentialDataset(Dataset):
         item_list_index = np.array(item_list_index)
         target_index = np.array(target_index)
         item_list_length = np.array(item_list_length, dtype=np.int64)
+
+        # print('uid list: ', uid_list)
+        # print('item_list_index: ', item_list_index)
+        # print('target_index: ', target_index)
+        # print('item_list_length: ', item_list_length)
 
         new_length = len(item_list_index)
         new_data = self.inter_feat[target_index]
@@ -138,12 +133,17 @@ class SequentialDataset(Dataset):
                 list_len = self.field2seqlen[list_field]
                 shape = (new_length, list_len) if isinstance(list_len, int) else (new_length,) + list_len
                 list_ftype = self.field2type[list_field]
-                dtype = torch.int64 if list_ftype in [FeatureType.TOKEN, FeatureType.TOKEN_SEQ] else torch.float64
+                dtype = torch.int64 if list_ftype in [FeatureType.TOKEN, FeatureType.TOKEN_SEQ] else torch.float32
                 new_dict[list_field] = torch.zeros(shape, dtype=dtype)
 
                 value = self.inter_feat[field]
                 for i, (index, length) in enumerate(zip(item_list_index, item_list_length)):
                     new_dict[list_field][i][:length] = value[index]
+
+        # print('new dict: ', new_dict)
+        # for element in new_dict:
+        #     print(element)
+        #     print(new_dict[element].shape)
 
         new_data.update(Interaction(new_dict))
         self.inter_feat = new_data

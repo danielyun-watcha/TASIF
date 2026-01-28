@@ -118,7 +118,7 @@ class DIENDataset(SequentialDataset):
                 list_len = self.field2seqlen[list_field]
                 shape = (new_length, list_len) if isinstance(list_len, int) else (new_length,) + list_len
                 list_ftype = self.field2type[list_field]
-                dtype = torch.int64 if list_ftype in [FeatureType.TOKEN, FeatureType.TOKEN_SEQ] else torch.float64
+                dtype = torch.int64 if list_ftype in [FeatureType.TOKEN, FeatureType.TOKEN_SEQ] else torch.float32
                 new_dict[list_field] = torch.zeros(shape, dtype=dtype)
 
                 value = self.inter_feat[field]

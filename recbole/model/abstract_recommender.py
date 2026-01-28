@@ -119,20 +119,28 @@ class SequentialRecommender(AbstractRecommender):
         self.ITEM_ID = config['ITEM_ID_FIELD']
         self.ITEM_SEQ = self.ITEM_ID + config['LIST_SUFFIX']
         self.ITEM_SEQ_LEN = config['ITEM_LIST_LENGTH_FIELD']
-        self.TIME_SEQ = config['TIME_FIELD'] + config['LIST_SUFFIX']
-        self.TIME_SPAN_ID = config['TIME_SPAN_ID_FIELD']
-        self.TIME_SPAN_ID_SEQ = self.TIME_SPAN_ID + config['LIST_SUFFIX']
         self.POS_ITEM_ID = self.ITEM_ID
         self.NEG_ITEM_ID = config['NEG_PREFIX'] + self.ITEM_ID
         self.max_seq_length = config['MAX_ITEM_LIST_LENGTH']
         self.n_items = dataset.num(self.ITEM_ID)
-        self.n_time_span_ids = max(dataset.inter_feat[self.TIME_SPAN_ID]) + 1
 
     def gather_indexes(self, output, gather_index):
         """Gathers the vectors at the specific positions over a minibatch"""
         gather_index = gather_index.view(-1, 1, 1).expand(-1, -1, output.shape[-1])
         output_tensor = output.gather(dim=1, index=gather_index)
         return output_tensor.squeeze(1)
+
+
+    def get_attention_mask(self, item_seq, bidirectional=False):
+        """Generate left-to-right uni-directional or bidirectional attention mask for multi-head attention."""
+        attention_mask = item_seq != 0
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # torch.bool
+        if not bidirectional:
+            extended_attention_mask = torch.tril(
+                extended_attention_mask.expand((-1, -1, item_seq.size(-1), -1))
+            )
+        extended_attention_mask = torch.where(extended_attention_mask, 0.0, -10000.0)
+        return extended_attention_mask
 
 
 class KnowledgeRecommender(AbstractRecommender):

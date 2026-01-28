@@ -27,6 +27,12 @@ import torch.optim as optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from tqdm import tqdm
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 from recbole.data.interaction import Interaction
 from recbole.data.dataloader import FullSortEvalDataLoader
 from recbole.evaluator import Evaluator, Collector
@@ -367,7 +373,23 @@ class Trainer(AbstractTrainer):
 
         self.eval_collector.data_collect(train_data)
 
+        # Initialize wandb if available and configured
+        self.use_wandb = WANDB_AVAILABLE and self.config.final_config_dict.get('use_wandb', False)
+        if self.use_wandb:
+            wandb_config = {k: str(v) if not isinstance(v, (bool, int, float, str, type(None))) else v
+                          for k, v in self.config.final_config_dict.items()}
+            wandb.init(
+                project=self.config.final_config_dict.get('wandb_project', 'recbole'),
+                name=f"{self.config['model']}_{self.config['dataset']}",
+                config=wandb_config,
+                reinit=True
+            )
+
         for epoch_idx in range(self.start_epoch, self.epochs):
+            # Reset score tracking if model supports it
+            if hasattr(self.model, 'reset_score_tracking'):
+                self.model.reset_score_tracking()
+
             # train
             training_start_time = time()
             train_loss = self._train_epoch(train_data, epoch_idx, show_progress=show_progress)
@@ -378,6 +400,17 @@ class Trainer(AbstractTrainer):
             if verbose:
                 self.logger.info(train_loss_output)
             self._add_train_loss_to_tensorboard(epoch_idx, train_loss)
+
+            # Wandb logging for log(sigmoid(scores))
+            if self.use_wandb and hasattr(self.model, 'get_avg_log_scores'):
+                avg_log_pos, avg_log_neg = self.model.get_avg_log_scores()
+                current_loss = sum(train_loss) if isinstance(train_loss, tuple) else train_loss
+                wandb.log({
+                    'epoch': epoch_idx,
+                    'train_loss': current_loss,
+                    'item_pos': avg_log_pos,
+                    'item_neg': avg_log_neg,
+                })
 
             # eval
             if self.eval_step <= 0 or not valid_data:
@@ -425,6 +458,11 @@ class Trainer(AbstractTrainer):
                         self.logger.info(stop_output)
                     break
         self._add_hparam_to_tensorboard(self.best_valid_score)
+
+        # Finish wandb run
+        if self.use_wandb:
+            wandb.finish()
+
         return self.best_valid_score, self.best_valid_result
 
     def _full_sort_batch_eval(self, batched_data):
