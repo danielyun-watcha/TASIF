@@ -4,7 +4,7 @@ use_gpu: True
 seed: 2020
 state: INFO
 reproducibility: True
-data_path: '/content/drive/MyDrive/TASIF/dataset/'
+data_path: 'dataset/'
 checkpoint_dir: 'saved'
 show_progress: True
 save_dataset: False
